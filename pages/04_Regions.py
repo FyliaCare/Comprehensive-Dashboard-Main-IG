@@ -89,8 +89,9 @@ activity_by_region["heat"] = (
 # ---------------------------
 # Load Ghana GeoJSON
 # ---------------------------
-with open("app_modules/data/ghana_regions.geojson", "r") as f:
+with open("data/ghana_regions.geojson", "r") as f:
     ghana_geojson = json.load(f)
+
 
 # ---------------------------
 # Choropleth Map
