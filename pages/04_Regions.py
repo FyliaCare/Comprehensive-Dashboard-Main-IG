@@ -1,5 +1,5 @@
 import streamlit as st
-import pydeck as pdk
+import plotly.graph_objects as go
 from app_modules import db
 from app_modules.utils import df_from_records
 
@@ -34,110 +34,105 @@ REGION_COORDS = {
 st.set_page_config(page_title="Regions & Heat Zones", page_icon="🗺️", layout="wide")
 db.init_db()
 
-st.title("🗺️ Regions & Heat Zones")
+st.title("🗺️ Ghana Regions & Heat Zones")
 
-# ------------------------------------------------
-# Add Region (using predefined coordinates)
-# ------------------------------------------------
-with st.expander("➕ Add Region", expanded=False):
-    with st.form("region_form"):
-        region_name = st.selectbox("Select Region*", options=REGIONS_GH)
-        weight = st.number_input("Heat Weight", min_value=0.0, value=1.0, step=0.1)
-        color = st.color_picker("Optional Color", value="#2457F5")
-        notes = st.text_area("Notes", height=80)
+# ---------------------------
+# Create static Ghana map
+# ---------------------------
+def plot_ghana_map(regions_db):
+    fig = go.Figure()
 
-        submitted = st.form_submit_button("Save Region")
-        if submitted:
-            if not region_name:
-                st.error("Region is required.")
-            else:
-                lat, lon = REGION_COORDS[region_name]
-                payload = {
-                    "name": region_name,
-                    "country": "Ghana",
-                    "latitude": lat,
-                    "longitude": lon,
-                    "weight": float(weight),
-                    "color": color,
-                    "notes": notes or None,
-                }
-                db.insert("regions", payload)
-                st.success(f"Region '{region_name}' saved.")
+    # Add all region points
+    for region, (lat, lon) in REGION_COORDS.items():
+        # check if DB has custom weight/color
+        row = regions_db[regions_db["name"] == region]
+        if not row.empty:
+            weight = row.iloc[0].get("weight", 1)
+            color = row.iloc[0].get("color", "#1f77b4")
+        else:
+            weight = 1
+            color = "#1f77b4"
 
-st.divider()
+        fig.add_trace(go.Scattergeo(
+            lon=[lon],
+            lat=[lat],
+            text=f"{region}<br>Weight: {weight}",
+            mode="markers+text",
+            textposition="top center",
+            marker=dict(
+                size=10 + weight * 5,
+                color=color,
+                line=dict(width=1, color="black")
+            ),
+            name=region
+        ))
 
-# ------------------------------------------------
-# Show Regions + Map
-# ------------------------------------------------
+    fig.update_geos(
+        scope="africa",
+        showcountries=True, countrycolor="black",
+        showland=True, landcolor="rgb(243,243,243)",
+        showocean=True, oceancolor="lightblue",
+        projection_type="mercator",
+        lataxis_range=[4, 11.5],   # Ghana latitude range
+        lonaxis_range=[-3.5, 1.5]  # Ghana longitude range
+    )
+    fig.update_layout(
+        margin={"r":0,"t":0,"l":0,"b":0},
+        height=600,
+        title="📍 Ghana Regions Map",
+        showlegend=False
+    )
+    return fig
+
+# ---------------------------
+# Manage DB + Display Map
+# ---------------------------
 regions = df_from_records(db.list_table("regions"))
 
+# Prepopulate DB with all regions if empty
 if regions.empty:
-    st.warning("⚠️ No regions yet. Add one above.")
-else:
-    st.metric("🌍 Total Regions", len(regions))
+    for region, (lat, lon) in REGION_COORDS.items():
+        db.insert("regions", {
+            "name": region,
+            "country": "Ghana",
+            "latitude": lat,
+            "longitude": lon,
+            "weight": 1.0,
+            "color": "#1f77b4",
+            "notes": None
+        })
+    regions = df_from_records(db.list_table("regions"))
 
-    st.dataframe(
-        regions.drop(columns=["created_at", "updated_at"]),
-        use_container_width=True, hide_index=True
+st.plotly_chart(plot_ghana_map(regions), use_container_width=True)
+
+# ---------------------------
+# Edit Section
+# ---------------------------
+with st.expander("✏️ Edit Region Settings", expanded=False):
+    ids = regions["id"].tolist()
+    target_id = st.selectbox(
+        "Select Region",
+        options=ids,
+        format_func=lambda i: regions.loc[regions["id"] == i, "name"].values[0] if i in ids else "-"
     )
 
-    # Build map layers
-    scatter = pdk.Layer(
-        "ScatterplotLayer",
-        data=regions,
-        get_position=["longitude", "latitude"],
-        get_color="color",
-        get_radius="weight*20000",
-        pickable=True
-    )
-    heat = pdk.Layer(
-        "HeatmapLayer",
-        data=regions,
-        get_position=["longitude", "latitude"],
-        aggregation='"SUM"',
-        get_weight="weight"
-    )
+    if target_id:
+        row = regions[regions["id"] == target_id].iloc[0]
+        with st.form("edit_region"):
+            weight = st.number_input("Heat Weight", min_value=0.0, value=float(row.get("weight") or 1.0), step=0.1)
+            color = st.color_picker("Color", value=row.get("color") or "#1f77b4")
+            notes = st.text_area("Notes", value=row.get("notes") or "", height=80)
 
-    view_state = pdk.ViewState(
-        latitude=7.9, longitude=-1.0, zoom=6, pitch=20
-    )
-
-    r = pdk.Deck(
-        map_style="mapbox://styles/mapbox/light-v9",
-        initial_view_state=view_state,
-        layers=[heat, scatter],
-        tooltip={"text": "{name} — {country}\nWeight: {weight}"}
-    )
-    st.pydeck_chart(r, use_container_width=True)
-
-    # ------------------------------------------------
-    # Edit / Delete Section
-    # ------------------------------------------------
-    with st.expander("✏️ Edit / Delete Region", expanded=False):
-        ids = regions["id"].tolist()
-        target_id = st.selectbox(
-            "Select Region",
-            options=ids,
-            format_func=lambda i: regions.loc[regions["id"] == i, "name"].values[0] if i in ids else "-"
-        )
-
-        if target_id:
-            row = regions[regions["id"] == target_id].iloc[0]
-            with st.form("edit_region"):
-                weight = st.number_input("Heat Weight", min_value=0.0, value=float(row.get("weight") or 1.0), step=0.1)
-                color = st.color_picker("Color", value=row.get("color") or "#2457F5")
-                notes = st.text_area("Notes", value=row.get("notes") or "", height=80)
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.form_submit_button("💾 Save Changes"):
-                        db.update("regions", int(target_id), {
-                            "weight": float(weight),
-                            "color": color,
-                            "notes": notes or None,
-                        })
-                        st.success("Region updated.")
-                with c2:
-                    if st.form_submit_button("🗑️ Delete Region"):
-                        db.delete("regions", int(target_id))
-                        st.warning("Region deleted.")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.form_submit_button("💾 Save Changes"):
+                    db.update("regions", int(target_id), {
+                        "weight": float(weight),
+                        "color": color,
+                        "notes": notes or None,
+                    })
+                    st.success("Region updated.")
+            with c2:
+                if st.form_submit_button("🗑️ Delete Region"):
+                    db.delete("regions", int(target_id))
+                    st.warning("Region deleted.")
