@@ -29,7 +29,7 @@ activity_by_region = pd.DataFrame([
 
 if not clients.empty:
     client_counts = clients.groupby("region_id")["id"].count().to_dict()
-    for idx, row in regions.iterrows():
+    for _, row in regions.iterrows():
         if row["id"] in client_counts:
             activity_by_region.loc[activity_by_region["region"] == row["name"], "clients"] = client_counts[row["id"]]
 
@@ -47,106 +47,97 @@ if not tasks.empty:
             if row.get("priority") == "Critical":
                 activity_by_region.loc[activity_by_region["region"] == region_name, "critical_tasks"] += 1
 
-# ---- Map Layers ----
-ghana_layer = pdk.Layer(
-    "GeoJsonLayer",
-    ghana_geojson,
-    opacity=0.25,
-    stroked=True,
-    filled=True,
-    extruded=False,
-    get_fill_color=[180, 180, 180, 60],
-    get_line_color=[50, 50, 50],
-)
+# Add completion %
+activity_by_region["completion_rate"] = (
+    (activity_by_region["completed_tasks"] /
+     (activity_by_region["open_tasks"] + activity_by_region["completed_tasks"]).replace(0, 1)) * 100
+).round(1)
 
-pins = []
+# ---- Map with PIN ICONS ----
+ICON_URL = "https://img.icons8.com/color/48/marker.png"
+
 for _, row in activity_by_region.iterrows():
     coords = REGION_COORDS.get(row["region"])
     if coords:
-        color = [50, 200, 50]  # green
-        if row["critical_tasks"] > 0:
-            color = [220, 20, 60]  # red
-        elif row["open_tasks"] > 5:
-            color = [255, 165, 0]  # orange
-        elif row["open_tasks"] > 0:
-            color = [255, 215, 0]  # yellow
+        row["latitude"] = coords[0]
+        row["longitude"] = coords[1]
+    else:
+        row["latitude"], row["longitude"] = None, None
 
-        pins.append({
-            "name": row["region"],
-            "latitude": coords[0],
-            "longitude": coords[1],
-            "clients": row["clients"],
-            "open_tasks": row["open_tasks"],
-            "completed_tasks": row["completed_tasks"],
-            "critical_tasks": row["critical_tasks"],
-            "color": color,
-            "size": max(8, row["clients"] * 3 + row["open_tasks"] * 2),
-        })
+# Drop missing coords
+pins = activity_by_region.dropna(subset=["latitude", "longitude"]).to_dict("records")
 
-pin_layer = pdk.Layer(
-    "ScatterplotLayer",
+icon_layer = pdk.Layer(
+    "IconLayer",
     data=pins,
+    get_icon="icon_data",
+    get_size=4,
+    size_scale=10,
     get_position=["longitude", "latitude"],
-    get_radius="size",
-    get_color="color",
     pickable=True,
+    icon_atlas=ICON_URL,
+    get_icon_color=[0, 100, 200],
+    get_icon_anchor="bottom",
+)
+
+ghana_layer = pdk.Layer(
+    "GeoJsonLayer",
+    ghana_geojson,
+    opacity=0.2,
+    stroked=True,
+    filled=False,
+    extruded=False,
+    get_line_color=[80, 80, 80],
 )
 
 view_state = pdk.ViewState(latitude=7.9, longitude=-1.0, zoom=6)
 
 deck = pdk.Deck(
     initial_view_state=view_state,
-    layers=[ghana_layer, pin_layer],
+    layers=[ghana_layer, icon_layer],
     tooltip={
-        "html": "<b>{name}</b><br/>👥 Clients: {clients}<br/>📋 Open Tasks: {open_tasks}<br/>✅ Completed: {completed_tasks}<br/>🔴 Critical: {critical_tasks}"
+        "html": "<b>{region}</b><br/>👥 Clients: {clients}<br/>📋 Open: {open_tasks}<br/>✅ Completed: {completed_tasks}<br/>🔴 Critical: {critical_tasks}"
     },
 )
 
 st.pydeck_chart(deck, use_container_width=True)
 
-# ---- Professional Summary ----
+# ---- Regional Activity Summary as Table ----
 st.markdown("## 📊 Regional Activity Summary")
 
-activity_by_region["completion_rate"] = (
-    (activity_by_region["completed_tasks"] / 
-     (activity_by_region["open_tasks"] + activity_by_region["completed_tasks"]).replace(0, 1)) * 100
-).round(1)
+styled_df = activity_by_region[["region", "clients", "open_tasks", "critical_tasks", "completed_tasks", "completion_rate"]].copy()
+styled_df = styled_df.rename(columns={
+    "region": "Region",
+    "clients": "Clients",
+    "open_tasks": "Open Tasks",
+    "critical_tasks": "Critical Tasks",
+    "completed_tasks": "Completed",
+    "completion_rate": "Completion %"
+})
 
-for _, row in activity_by_region.iterrows():
-    c1, c2, c3, c4, c5 = st.columns([2,1,1,1,2])
-    with c1:
-        st.markdown(f"### {row['region']}")
-    with c2:
-        st.metric("Clients", row["clients"])
-    with c3:
-        st.metric("Open", row["open_tasks"])
-    with c4:
-        st.metric("Critical", row["critical_tasks"])
-    with c5:
-        st.metric("Completion %", f"{row['completion_rate']}%")
+st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
+# ---- Charts ----
 st.divider()
-
-# ---- Better Charts ----
 st.markdown("## 📈 Regional Breakdown")
 
 col1, col2 = st.columns(2)
 
 with col1:
     fig_clients = px.bar(
-        activity_by_region.sort_values("clients", ascending=False),
-        x="region", y="clients", text="clients",
+        styled_df.sort_values("Clients", ascending=False),
+        x="Region", y="Clients", text="Clients",
         title="Clients per Region",
-        color="clients", color_continuous_scale="Blues"
+        color="Clients", color_continuous_scale="Blues"
     )
     fig_clients.update_traces(textposition="outside")
     st.plotly_chart(fig_clients, use_container_width=True)
 
 with col2:
     fig_tasks = px.bar(
-        activity_by_region.melt(id_vars="region", value_vars=["open_tasks", "completed_tasks"]),
-        x="region", y="value", color="variable",
+        styled_df.melt(id_vars="Region", value_vars=["Open Tasks", "Completed"]),
+        x="Region", y="value", color="variable",
         barmode="stack", title="Tasks per Region (Open vs Completed)",
-        color_discrete_map={"open_tasks": "orange", "completed_tasks": "green"}
+        color_discrete_map={"Open Tasks": "orange", "Completed": "green"}
     )
     st.plotly_chart(fig_tasks, use_container_width=True)
