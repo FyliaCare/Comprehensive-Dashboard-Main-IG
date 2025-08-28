@@ -1,5 +1,5 @@
 import streamlit as st
-import plotly.express as px
+import pydeck as pdk
 import pandas as pd
 import json
 from app_modules import db
@@ -8,154 +8,126 @@ from app_modules.utils import df_from_records
 st.set_page_config(page_title="Regions & Heat Zones", page_icon="🗺️", layout="wide")
 db.init_db()
 
-st.title("🗺️ Ghana Regions & Heat Zones")
+st.title("🗺️ Regions & Heat Zones")
 
-# ---------------------------
-# Load Data
-# ---------------------------
+# ---- Load Data ----
+regions = df_from_records(db.list_table("regions"))
 clients = df_from_records(db.list_table("clients"))
 tasks = df_from_records(db.list_table("tasks"))
-regions_db = df_from_records(db.list_table("regions"))
 
-# If no regions table yet → fallback to static Ghana regions
-if regions_db.empty:
-    regions_db = pd.DataFrame({
-        "id": range(1, 17),
-        "name": [
-            "Greater Accra","Ashanti","Western","Western North","Central","Eastern",
-            "Volta","Oti","Northern","Savannah","North East","Upper East",
-            "Upper West","Bono","Bono East","Ahafo"
-        ]
-    })
-
-# ---------------------------
-# Activity calculation (HEAT)
-# ---------------------------
-activity_by_region = pd.DataFrame({"id": regions_db["id"], "name": regions_db["name"]})
-
-# Default all to zero
-activity_by_region["clients_count"] = 0
-activity_by_region["open_tasks"] = 0
-activity_by_region["critical_tasks"] = 0
-
-# Add clients count
-if not clients.empty and "region_id" in clients.columns:
-    base = clients.groupby("region_id").size().reset_index(name="clients_count")
-    activity_by_region = activity_by_region.merge(base, left_on="id", right_on="region_id", how="left")
-    activity_by_region["clients_count"] = activity_by_region["clients_count_y"].fillna(0).astype(int)
-    activity_by_region = activity_by_region.drop(columns=[c for c in activity_by_region.columns if c.endswith("_y") or c == "region_id"])
-
-# Add tasks count
-if not tasks.empty and "client_id" in tasks.columns and not clients.empty:
-    task_client = tasks.merge(
-        clients[["id", "region_id"]],
-        left_on="client_id",
-        right_on="id",
-        how="left",
-        suffixes=("", "_cli")
-    )
-
-    # Open tasks
-    if "status" in task_client.columns:
-        open_mask = ~task_client["status"].fillna("").str.lower().isin(["done", "completed"])
-        open_by_region = task_client[open_mask].groupby("region_id").size().reset_index(name="open_tasks")
-        activity_by_region = activity_by_region.merge(open_by_region, left_on="id", right_on="region_id", how="left")
-        activity_by_region["open_tasks"] = activity_by_region["open_tasks_x"].fillna(0).astype(int)
-        activity_by_region = activity_by_region.drop(columns=["region_id", "open_tasks_x"])
-
-    # Critical tasks
-    if "priority" in task_client.columns:
-        crit_mask = task_client["priority"].fillna("").str.lower().eq("critical")
-        crit_by_region = task_client[crit_mask].groupby("region_id").size().reset_index(name="critical_tasks")
-        activity_by_region = activity_by_region.merge(crit_by_region, left_on="id", right_on="region_id", how="left")
-        if "critical_tasks" in activity_by_region.columns:
-            activity_by_region["critical_tasks"] = activity_by_region["critical_tasks"].fillna(0).astype(int)
-        activity_by_region = activity_by_region.drop(columns=["region_id"])
-
-# Guarantee required columns exist
-for col in ["clients_count", "open_tasks", "critical_tasks"]:
-    if col not in activity_by_region.columns:
-        activity_by_region[col] = 0
-    else:
-        activity_by_region[col] = activity_by_region[col].fillna(0).astype(int)
-
-# Final HEAT metric
-activity_by_region["heat"] = (
-    activity_by_region["clients_count"] * 1.0
-    + activity_by_region["open_tasks"] * 0.5
-    + activity_by_region["critical_tasks"] * 2.0
-)
-
-# ---------------------------
-# Load Ghana GeoJSON
-# ---------------------------
+# Load Ghana region polygons
 with open("data/ghana_regions.geojson", "r") as f:
     ghana_geojson = json.load(f)
 
+# ---- Prepare Activity Data ----
+REGION_COORDS = {r["name"]: (r["latitude"], r["longitude"]) for _, r in regions.iterrows()} if not regions.empty else {}
 
-# ---------------------------
-# Choropleth Map
-# ---------------------------
-fig = px.choropleth_mapbox(
-    activity_by_region,
-    geojson=ghana_geojson,
-    featureidkey="properties.name",
-    locations="name",
-    color="heat",
-    color_continuous_scale="YlOrRd",
-    mapbox_style="carto-positron",
-    center={"lat": 7.9, "lon": -1.0},
-    zoom=6,
-    opacity=0.65,
-    hover_name="name",
-    hover_data={
-        "clients_count": True,
-        "open_tasks": True,
-        "critical_tasks": True,
-        "heat": True
-    }
+activity_by_region = pd.DataFrame([
+    {"region": name, "clients": 0, "open_tasks": 0, "completed_tasks": 0, "critical_tasks": 0}
+    for name in [f["properties"]["REGION"] for f in ghana_geojson["features"]]
+])
+
+if not clients.empty:
+    client_counts = clients.groupby("region_id")["id"].count().to_dict()
+    for idx, row in regions.iterrows():
+        if row["id"] in client_counts:
+            activity_by_region.loc[activity_by_region["region"] == row["name"], "clients"] = client_counts[row["id"]]
+
+if not tasks.empty:
+    for idx, row in tasks.iterrows():
+        region_id = None
+        if row.get("client_id") in clients["id"].values:
+            region_id = clients.loc[clients["id"] == row["client_id"], "region_id"].values[0]
+        if region_id in regions["id"].values:
+            region_name = regions.loc[regions["id"] == region_id, "name"].values[0]
+            if row["status"] in ["Open", "In Progress", "Blocked"]:
+                activity_by_region.loc[activity_by_region["region"] == region_name, "open_tasks"] += 1
+            if row["status"] == "Completed":
+                activity_by_region.loc[activity_by_region["region"] == region_name, "completed_tasks"] += 1
+            if row.get("priority") == "Critical":
+                activity_by_region.loc[activity_by_region["region"] == region_name, "critical_tasks"] += 1
+
+# ---- Map Layers ----
+ghana_layer = pdk.Layer(
+    "GeoJsonLayer",
+    ghana_geojson,
+    opacity=0.2,
+    stroked=True,
+    filled=True,
+    extruded=False,
+    get_fill_color=[200, 200, 200, 50],
+    get_line_color=[60, 60, 60],
 )
 
-fig.update_layout(
-    margin={"r":0,"t":30,"l":0,"b":0},
-    title="📊 Regional Heat Zones (Clients + Tasks)"
+# Icon data
+pins = []
+for _, row in activity_by_region.iterrows():
+    coords = REGION_COORDS.get(row["region"])
+    if coords:
+        color = [0, 200, 0]  # green
+        if row["critical_tasks"] > 0:
+            color = [200, 0, 0]  # red
+        elif row["open_tasks"] > 5:
+            color = [255, 140, 0]  # orange
+        elif row["open_tasks"] > 0:
+            color = [255, 215, 0]  # yellow
+
+        pins.append({
+            "name": row["region"],
+            "latitude": coords[0],
+            "longitude": coords[1],
+            "clients": row["clients"],
+            "open_tasks": row["open_tasks"],
+            "completed_tasks": row["completed_tasks"],
+            "critical_tasks": row["critical_tasks"],
+            "color": color,
+            "size": max(6, row["clients"] * 3 + row["open_tasks"] * 2),
+        })
+
+icon_layer = pdk.Layer(
+    "ScatterplotLayer",
+    data=pins,
+    get_position=["longitude", "latitude"],
+    get_radius="size",
+    get_color="color",
+    pickable=True,
 )
 
-st.plotly_chart(fig, use_container_width=True)
+view_state = pdk.ViewState(latitude=7.9, longitude=-1.0, zoom=6)
 
-# ---------------------------
-# Sidebar Region Details
-# ---------------------------
-st.sidebar.header("📋 Region Details")
-selected_region = st.sidebar.selectbox("Choose a Region", activity_by_region["name"].tolist())
+deck = pdk.Deck(
+    initial_view_state=view_state,
+    layers=[ghana_layer, icon_layer],
+    tooltip={
+        "text": "{name}\nClients: {clients}\nOpen Tasks: {open_tasks}\nCompleted: {completed_tasks}\nCritical: {critical_tasks}"
+    },
+)
 
-if selected_region:
-    st.sidebar.subheader(f"🔍 {selected_region}")
-    region_id = activity_by_region.loc[activity_by_region["name"] == selected_region, "id"].iloc[0]
+st.pydeck_chart(deck, use_container_width=True)
 
-    # Clients
-    if not clients.empty:
-        clients_in_region = clients[clients["region_id"] == region_id]
-        if not clients_in_region.empty:
-            st.sidebar.write("### Clients")
-            for _, row in clients_in_region.iterrows():
-                st.sidebar.write(f"- **{row['name']}** ({row.get('contact_person','N/A')})")
-        else:
-            st.sidebar.info("No clients in this region yet.")
+# ---- Summary beneath map ----
+st.subheader("📊 Regional Activity Summary")
 
-    # Tasks
-    if not tasks.empty and "client_id" in tasks.columns:
-        task_client = tasks.merge(
-            clients[["id", "region_id"]],
-            left_on="client_id",
-            right_on="id",
-            how="left",
-            suffixes=("", "_cli")
-        )
-        tasks_in_region = task_client[task_client["region_id"] == region_id]
-        if not tasks_in_region.empty:
-            st.sidebar.write("### Tasks")
-            for _, row in tasks_in_region.iterrows():
-                st.sidebar.write(f"- {row['title']} ({row.get('status','Unknown')})")
-        else:
-            st.sidebar.info("No tasks logged for this region yet.")
+# Progress column
+activity_by_region["completion_rate"] = (
+    (activity_by_region["completed_tasks"] / (activity_by_region["open_tasks"] + activity_by_region["completed_tasks"]).replace(0, 1)) * 100
+).round(1)
+
+# Display as dataframe with progress bars
+for _, row in activity_by_region.iterrows():
+    st.markdown(
+        f"### {row['region']}  "
+        f"🧑 Clients: {row['clients']} | 🔴 Critical: {row['critical_tasks']} | 📋 Open: {row['open_tasks']} | ✅ Completed: {row['completed_tasks']}"
+    )
+    st.progress(int(row["completion_rate"]))
+
+# ---- Extra Charts ----
+st.divider()
+st.subheader("📈 Regional Breakdown")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.bar_chart(activity_by_region.set_index("region")[["clients"]], use_container_width=True)
+with col2:
+    st.bar_chart(activity_by_region.set_index("region")[["open_tasks", "completed_tasks"]], use_container_width=True)
