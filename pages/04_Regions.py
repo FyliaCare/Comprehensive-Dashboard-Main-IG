@@ -125,11 +125,14 @@ if not clients.empty and not industries.empty and "industry_id" in clients.colum
 # ---------------------------
 # Activity calculation (HEAT)
 # ---------------------------
+# ---------------------------
+# Activity calculation (HEAT)
+# ---------------------------
 # Base activity = number of clients in region
 activity_by_region = pd.DataFrame({"id": regions_db["id"], "name": regions_db["name"]})
 activity_by_region["clients_count"] = 0
 activity_by_region["open_tasks"] = 0
-activity_by_region["critical_tasks"] = 0
+activity_by_region["critical_tasks"] = 0  # ensure columns exist
 
 if not clients.empty:
     base = clients.groupby("region_id").size().reset_index(name="clients_count")
@@ -142,6 +145,7 @@ if not tasks.empty and "client_id" in tasks.columns:
     # Map tasks -> region via client_id
     if not clients.empty:
         task_client = tasks.merge(clients[["id", "region_id"]], left_on="client_id", right_on="id", how="left", suffixes=("", "_cli"))
+
         # Open tasks (not Completed/Done)
         if "status" in task_client.columns:
             open_mask = ~task_client["status"].fillna("").str.lower().isin(["done", "completed"])
@@ -149,23 +153,16 @@ if not tasks.empty and "client_id" in tasks.columns:
             open_mask = pd.Series([True] * len(task_client))
         open_by_region = task_client[open_mask].groupby("region_id").size().reset_index(name="open_tasks")
         activity_by_region = activity_by_region.merge(open_by_region, left_on="id", right_on="region_id", how="left")
-        activity_by_region["open_tasks"] = activity_by_region["open_tasks"].fillna(0).astype(int)
+        activity_by_region["open_tasks"] = activity_by_region["open_tasks_x"].fillna(0).astype(int)
+        activity_by_region = activity_by_region.drop(columns=["region_id", "open_tasks_x"])
+
         # Critical tasks
         if "priority" in task_client.columns:
             crit_mask = task_client["priority"].fillna("").str.lower().eq("critical")
             crit_by_region = task_client[crit_mask].groupby("region_id").size().reset_index(name="critical_tasks")
             activity_by_region = activity_by_region.merge(crit_by_region, left_on="id", right_on="region_id", how="left")
             activity_by_region["critical_tasks"] = activity_by_region["critical_tasks"].fillna(0).astype(int)
-
-        # Clean temp columns
-        for c in ["region_id"]:
-            if c in activity_by_region.columns:
-                dup_cols = [col for col in activity_by_region.columns if col == c]
-                for dc in dup_cols:
-                    try:
-                        activity_by_region = activity_by_region.drop(columns=[dc])
-                    except Exception:
-                        pass
+            activity_by_region = activity_by_region.drop(columns=["region_id"])
 
 # Final HEAT metric (tune weights as you prefer)
 activity_by_region["heat"] = (
