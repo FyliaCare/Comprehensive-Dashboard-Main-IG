@@ -54,15 +54,31 @@ activity_by_region["completion_rate"] = (
 ).round(1)
 
 # ---- Map with PIN ICONS ----
+# ---- Map with PIN ICONS ----
 ICON_URL = "https://img.icons8.com/color/48/marker.png"
 
-for _, row in activity_by_region.iterrows():
-    coords = REGION_COORDS.get(row["region"])
-    if coords:
-        row["latitude"] = coords[0]
-        row["longitude"] = coords[1]
-    else:
-        row["latitude"], row["longitude"] = None, None
+# Attach coordinates
+activity_by_region["latitude"] = activity_by_region["region"].map(
+    lambda r: REGION_COORDS[r][0] if r in REGION_COORDS else None
+)
+activity_by_region["longitude"] = activity_by_region["region"].map(
+    lambda r: REGION_COORDS[r][1] if r in REGION_COORDS else None
+)
+
+pins = activity_by_region.dropna(subset=["latitude", "longitude"]).to_dict("records")
+
+icon_layer = pdk.Layer(
+    "IconLayer",
+    data=pins,
+    get_icon="icon_data",
+    get_size=4,
+    size_scale=10,
+    get_position=["longitude", "latitude"],
+    pickable=True,
+    icon_atlas=ICON_URL,
+    get_icon_anchor="bottom",
+)
+
 
 # Drop missing coords
 pins = activity_by_region.dropna(subset=["latitude", "longitude"]).to_dict("records")
